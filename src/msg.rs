@@ -11,7 +11,7 @@ pub enum ExecuteMsg {
         signature: HexBinary,
         randomness: HexBinary,
     },
-    NextRandomness,
+    NextBeacon,
 }
 
 #[cw_serde]

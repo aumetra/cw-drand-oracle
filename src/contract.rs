@@ -36,7 +36,7 @@ pub fn execute(
             signature,
             randomness,
         } => execute::add_beacon(deps, round, signature, randomness),
-        ExecuteMsg::NextRandomness {} => execute::next_beacon(deps, env, info),
+        ExecuteMsg::NextBeacon {} => execute::next_beacon(deps, env, info),
     }
 }
 
