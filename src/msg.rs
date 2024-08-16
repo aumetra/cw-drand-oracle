@@ -11,6 +11,7 @@ pub enum ExecuteMsg {
         signature: HexBinary,
         randomness: HexBinary,
     },
+    NextRandomness,
 }
 
 #[cw_serde]
@@ -21,7 +22,7 @@ pub enum QueryMsg {
     Beacon { round: Uint64 },
 
     // Get the latest beacon known to the contract
-    #[returns(LatestBeaconResponse)]
+    #[returns(ConcreteBeacon)]
     LatestBeacon {},
 }
 
@@ -31,7 +32,7 @@ pub struct BeaconResponse {
 }
 
 #[cw_serde]
-pub struct LatestBeaconResponse {
+pub struct ConcreteBeacon {
     pub round: Uint64,
     pub uniform_seed: [u8; 32],
 }

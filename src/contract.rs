@@ -26,8 +26,8 @@ pub fn instantiate(
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn execute(
     deps: DepsMut,
-    _env: Env,
-    _info: MessageInfo,
+    env: Env,
+    info: MessageInfo,
     msg: ExecuteMsg,
 ) -> Result<Response, ContractError> {
     match msg {
@@ -36,12 +36,16 @@ pub fn execute(
             signature,
             randomness,
         } => execute::add_beacon(deps, round, signature, randomness),
+        ExecuteMsg::NextRandomness {} => execute::next_beacon(deps, env, info),
     }
 }
 
 pub mod execute {
-    use crate::state::Randomness;
-    use cosmwasm_std::{HashFunction, HexBinary, Uint64};
+    use crate::{
+        msg::ConcreteBeacon,
+        state::{Randomness, DELIVERY_QUEUES},
+    };
+    use cosmwasm_std::{HashFunction, HexBinary, SubMsg, Timestamp, Uint64, WasmMsg};
     use hex_literal::hex;
     use sha2::{Digest, Sha256};
 
@@ -49,6 +53,21 @@ pub mod execute {
 
     const G1_DOMAIN: &[u8] = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_";
     const QUICKNET_PUBLIC_KEY: [u8; 96] = hex!("83cf0f2896adee7eb8b5f01fcad3912212c437e0073e911fb90022d3e760183c8c4b450b6a0a6c3ac6a5776a2d1064510d1fec758c921cc22b0e17e63aaf4bcb5ed66304de9cf809bd274ca73bab4af5a6e9c76a4bc09e76eae8991ef5ece45a");
+
+    const GENESIS: Timestamp = Timestamp::from_seconds(1692803367);
+    const PERIOD_IN_NS: u64 = 3_000_000_000;
+
+    const GAS_LIMIT: u64 = 10_000_000;
+
+    fn next_round(now: Timestamp) -> u64 {
+        if now < GENESIS {
+            1
+        } else {
+            let from_genesis = now.nanos() - GENESIS.nanos();
+            let periods_since_genesis = from_genesis / PERIOD_IN_NS;
+            periods_since_genesis + 1 + 1 // Second addition to convert to 1-based counting
+        }
+    }
 
     pub fn add_beacon(
         deps: DepsMut,
@@ -86,6 +105,44 @@ pub mod execute {
             },
         )?;
 
+        let mut response: Response = Response::new();
+
+        // Load from the job queue and send the beacon to all receivers
+        if let Some(queue) = DELIVERY_QUEUES.may_load(deps.storage, round.u64())? {
+            for receiver in queue.receivers {
+                response = response.add_submessage(
+                    SubMsg::new(WasmMsg::Execute {
+                        contract_addr: receiver.into(),
+                        msg: cosmwasm_std::to_json_binary(&ConcreteBeacon {
+                            round,
+                            uniform_seed: reproduced_randomness.into(),
+                        })?,
+                        funds: vec![],
+                    })
+                    .with_gas_limit(GAS_LIMIT),
+                );
+            }
+        }
+
+        // Delete the job queue
+        DELIVERY_QUEUES.remove(deps.storage, round.u64());
+
+        Ok(Response::default())
+    }
+
+    pub fn next_beacon(
+        deps: DepsMut,
+        env: Env,
+        info: MessageInfo,
+    ) -> Result<Response, ContractError> {
+        let next_round = next_round(env.block.time);
+        let mut queue = DELIVERY_QUEUES
+            .may_load(deps.storage, next_round)?
+            .unwrap_or_default();
+        queue.receivers.insert(info.sender);
+
+        DELIVERY_QUEUES.save(deps.storage, next_round, &queue)?;
+
         Ok(Response::default())
     }
 }
@@ -99,7 +156,7 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
 }
 
 pub mod query {
-    use crate::msg::{BeaconResponse, LatestBeaconResponse};
+    use crate::msg::{BeaconResponse, ConcreteBeacon};
 
     use super::*;
     use cosmwasm_std::Uint64;
@@ -112,12 +169,12 @@ pub mod query {
             })
     }
 
-    pub fn latest_beacon(deps: Deps) -> StdResult<LatestBeaconResponse> {
+    pub fn latest_beacon(deps: Deps) -> StdResult<ConcreteBeacon> {
         BEACONS
             .last(deps.storage)
             .transpose()
             .ok_or_else(|| StdError::not_found("no known beacons"))?
-            .map(|(round, beacon)| LatestBeaconResponse {
+            .map(|(round, beacon)| ConcreteBeacon {
                 round: round.into(),
                 uniform_seed: beacon.uniform_seed,
             })
@@ -127,7 +184,7 @@ pub mod query {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::msg::{BeaconResponse, LatestBeaconResponse};
+    use crate::msg::{BeaconResponse, ConcreteBeacon};
     use cosmwasm_std::{
         from_json,
         testing::{mock_dependencies, mock_env},
@@ -166,7 +223,9 @@ mod tests {
         let env = mock_env();
 
         let mut msg = add_beacon_msg();
-        let ExecuteMsg::AddBeacon { signature, .. } = &mut msg;
+        let ExecuteMsg::AddBeacon { signature, .. } = &mut msg else {
+            unreachable!();
+        };
 
         let mut sig = Vec::from(signature.clone());
         sig[0] ^= 0xF3;
@@ -183,7 +242,9 @@ mod tests {
         let env = mock_env();
 
         let mut msg = add_beacon_msg();
-        let ExecuteMsg::AddBeacon { randomness, .. } = &mut msg;
+        let ExecuteMsg::AddBeacon { randomness, .. } = &mut msg else {
+            unreachable!();
+        };
 
         let mut rand = Vec::from(randomness.clone());
         rand[0] ^= 0xF3;
@@ -202,7 +263,7 @@ mod tests {
         execute(deps.as_mut(), env.clone(), message_info(), add_beacon_msg()).unwrap();
 
         let res = query(deps.as_ref(), env, QueryMsg::LatestBeacon {}).unwrap();
-        let value: LatestBeaconResponse = from_json(&res).unwrap();
+        let value: ConcreteBeacon = from_json(&res).unwrap();
         assert_eq!(value.uniform_seed, RANDOMNESS);
     }
 
